@@ -101,6 +101,7 @@ func processFilePart(ci <-chan JobDefinition, co chan<- map[string]*Location) {
 			readFile.Seek(job.byteOffset-1, 0)
 		}
 		fileScanner := bufio.NewScanner(readFile)
+		fileScanner.Buffer(make([]byte, 1048576), 1048576)
 		fileScanner.Split(bufio.ScanLines)
 
 		m := make(map[string]*Location, INITIAL_MAP_SIZE)
