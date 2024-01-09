@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"math"
+	_ "net/http/pprof"
 	"os"
 	"sort"
 	"strconv"
@@ -26,6 +27,8 @@ type JobDefinition struct {
 	byteOffset int64
 	byteLength int64
 }
+
+const INITIAL_MAP_SIZE = 2048
 
 func toString(loc Location) string {
 	return fmt.Sprintf("%s=%.1f/%.1f/%.1f", loc.name, loc.min, loc.sum/float64(loc.count), loc.max)
@@ -100,7 +103,7 @@ func processFilePart(ci <-chan JobDefinition, co chan<- map[string]*Location) {
 		fileScanner := bufio.NewScanner(readFile)
 		fileScanner.Split(bufio.ScanLines)
 
-		m := make(map[string]*Location)
+		m := make(map[string]*Location, INITIAL_MAP_SIZE)
 
 		bytesScanned := int64(0)
 		for fileScanner.Scan() && bytesScanned < job.byteLength {
@@ -150,16 +153,7 @@ func mergeMaps(a map[string]*Location, b map[string]*Location) {
 	}
 }
 
-func main() {
-	filename := os.Args[1]
-	nWorkerThreads64, err := strconv.ParseInt(os.Args[2], 10, 8)
-	nWorkerThreads := int(nWorkerThreads64)
-
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-
+func parseFile(filename string, nWorkerThreads int) map[string]*Location {
 	fileSize := getFileSize(filename)
 	blockSize := fileSize / int64(nWorkerThreads)
 
@@ -174,18 +168,40 @@ func main() {
 		c <- JobDefinition{filename, int64(i) * blockSize, blockSize}
 	}
 
-	resultMap := make(map[string]*Location)
+	resultMap := make(map[string]*Location, INITIAL_MAP_SIZE)
 
 	for i := 0; i < nWorkerThreads; i++ {
 		m := <-res
 		mergeMaps(resultMap, m)
 	}
 
+	return resultMap
+}
+
+func main() {
+	filename := "../1brc/measurements.txt"
+	nWorkerThreads := 1
+
+	if len(os.Args) > 2 {
+		nWorkerThreads64, err := strconv.ParseInt(os.Args[2], 10, 8)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		nWorkerThreads = int(nWorkerThreads64)
+	}
+	if len(os.Args) > 1 {
+		filename = os.Args[1]
+	}
+
+	resultMap := parseFile(filename, nWorkerThreads)
+
 	keys := make([]string, 0, len(resultMap))
 	for k := range resultMap {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	fmt.Println("Total locations:", len(keys))
 
 	results := make([]string, len(resultMap))
 	for i, k := range keys {
