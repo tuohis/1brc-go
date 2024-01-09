@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"math"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 type Location struct {
@@ -29,10 +31,20 @@ func toString(loc Location) string {
 	return fmt.Sprintf("%s=%.1f/%.1f/%.1f", loc.name, loc.min, loc.sum/float64(loc.count), loc.max)
 }
 
-func processLine(line string, m map[string]*Location) {
-	parts := strings.Split(line, ";")
-	name := parts[0]
-	value, _ := strconv.ParseFloat(parts[1], 32)
+func parseFloat(byteStr []byte) float64 {
+	value, _ := strconv.ParseFloat(string(byteStr), 32)
+	return value
+}
+
+func processLine(line []byte, m map[string]*Location) {
+	nameBytes, valueBytes, found := bytes.Cut(line, []byte{';'})
+	if !found {
+		fmt.Printf("Separator not found in line %s\n", line)
+		return
+	}
+
+	name := string(nameBytes)
+	value := parseFloat(valueBytes)
 	oldEntry, exists := m[name]
 
 	if exists {
@@ -45,14 +57,17 @@ func processLine(line string, m map[string]*Location) {
 	}
 }
 
-func getFirstRune(str string) rune {
-	for _, c := range str {
-		return c
+func getFirstRune(line []byte) rune {
+	for i := 0; i < len(line); i++ {
+		rune, length := utf8.DecodeRune(line[i:])
+		if length > 0 {
+			return rune
+		}
 	}
 	return '0'
 }
 
-func isValidLine(line string) bool {
+func isValidLine(line []byte) bool {
 	first := getFirstRune(line)
 	return unicode.IsUpper(first) && unicode.IsLetter(first)
 }
@@ -76,7 +91,7 @@ func processFilePart(ci <-chan JobDefinition, co chan<- map[string]*Location) {
 
 		bytesScanned := int64(0)
 		for fileScanner.Scan() && bytesScanned < job.byteLength {
-			line := fileScanner.Text()
+			line := fileScanner.Bytes()
 			bytesScanned += int64(len(line))
 			// All lines should start with an uppercase letter; discard those who don't.
 			if isValidLine(line) {
