@@ -32,8 +32,21 @@ func toString(loc Location) string {
 }
 
 func parseFloat(byteStr []byte) float64 {
-	value, _ := strconv.ParseFloat(string(byteStr), 32)
-	return value
+	zeroCode := int('0')
+
+	// The value has exactly one decimal
+	multiplier := 0.1
+	if byteStr[0] == '-' {
+		multiplier = -0.1
+	}
+
+	intValue := 0
+	for _, b := range byteStr {
+		if b >= '0' && b <= '9' {
+			intValue = intValue*10 + (int(b) - zeroCode)
+		}
+	}
+	return multiplier * float64(intValue)
 }
 
 func processLine(line []byte, m map[string]*Location) {
