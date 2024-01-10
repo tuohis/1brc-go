@@ -4,8 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"hash/maphash"
 	"math"
-	_ "net/http/pprof"
 	"os"
 	"sort"
 	"strconv"
@@ -14,8 +14,14 @@ import (
 	"unicode/utf8"
 )
 
+type TupleIntString struct {
+	num int
+	str string
+}
+
 type Location struct {
-	name  string
+	name  []byte
+	hash  int
 	min   float64
 	max   float64
 	sum   float64
@@ -29,6 +35,16 @@ type JobDefinition struct {
 }
 
 const INITIAL_MAP_SIZE = 2048
+
+var SEED = maphash.MakeSeed()
+
+func calculateHash(bytes []byte) int {
+	h := 0x811c9dc5
+	for _, b := range bytes {
+		h = (h ^ int(b)) * 0x01000193
+	}
+	return h
+}
 
 func toString(loc Location) string {
 	return fmt.Sprintf("%s=%.1f/%.1f/%.1f", loc.name, loc.min, loc.sum/float64(loc.count), loc.max)
@@ -52,16 +68,16 @@ func parseFloat(byteStr []byte) float64 {
 	return multiplier * float64(intValue)
 }
 
-func processLine(line []byte, m map[string]*Location) {
+func processLine(line []byte, m map[int]*Location) {
 	nameBytes, valueBytes, found := bytes.Cut(line, []byte{';'})
 	if !found {
 		fmt.Printf("Separator not found in line %s\n", line)
 		return
 	}
 
-	name := string(nameBytes)
+	hash := calculateHash(nameBytes)
 	value := parseFloat(valueBytes)
-	oldEntry, exists := m[name]
+	oldEntry, exists := m[hash]
 
 	if exists {
 		oldEntry.min = math.Min(oldEntry.min, value)
@@ -69,7 +85,10 @@ func processLine(line []byte, m map[string]*Location) {
 		oldEntry.sum += value
 		oldEntry.count++
 	} else {
-		m[name] = &Location{name, value, value, value, 1}
+		name := make([]byte, len(nameBytes))
+		copy(name, nameBytes)
+		// name := nameBytes
+		m[hash] = &Location{name, hash, value, value, value, 1}
 	}
 }
 
@@ -88,10 +107,8 @@ func isValidLine(line []byte) bool {
 	return unicode.IsUpper(first) && unicode.IsLetter(first)
 }
 
-func processFilePart(ci <-chan JobDefinition, co chan<- map[string]*Location) {
+func processFilePart(ci <-chan JobDefinition, co chan<- map[int]*Location) {
 	for job := range ci {
-		fmt.Println("Starting to process ", job)
-
 		readFile, err := os.Open(job.filename)
 		if err != nil {
 			fmt.Println(err)
@@ -104,7 +121,7 @@ func processFilePart(ci <-chan JobDefinition, co chan<- map[string]*Location) {
 		fileScanner.Buffer(make([]byte, 1048576), 1048576)
 		fileScanner.Split(bufio.ScanLines)
 
-		m := make(map[string]*Location, INITIAL_MAP_SIZE)
+		m := make(map[int]*Location, INITIAL_MAP_SIZE)
 
 		bytesScanned := int64(0)
 		for fileScanner.Scan() && bytesScanned < job.byteLength {
@@ -119,7 +136,6 @@ func processFilePart(ci <-chan JobDefinition, co chan<- map[string]*Location) {
 		readFile.Close()
 
 		co <- m
-		fmt.Println("Completed processing ", job)
 	}
 }
 
@@ -136,6 +152,7 @@ func getFileSize(filename string) int64 {
 func mergeLocations(a *Location, b *Location) *Location {
 	return &Location{
 		a.name,
+		a.hash,
 		math.Min(a.min, b.min),
 		math.Max(a.max, b.max),
 		a.sum + b.sum,
@@ -143,7 +160,7 @@ func mergeLocations(a *Location, b *Location) *Location {
 	}
 }
 
-func mergeMaps(a map[string]*Location, b map[string]*Location) {
+func mergeMaps(a map[int]*Location, b map[int]*Location) {
 	for key, value := range b {
 		oldValue, exists := a[key]
 		if exists {
@@ -154,12 +171,12 @@ func mergeMaps(a map[string]*Location, b map[string]*Location) {
 	}
 }
 
-func parseFile(filename string, nWorkerThreads int) map[string]*Location {
+func parseFile(filename string, nWorkerThreads int) map[int]*Location {
 	fileSize := getFileSize(filename)
 	blockSize := fileSize / int64(nWorkerThreads)
 
 	c := make(chan JobDefinition)
-	res := make(chan map[string]*Location)
+	res := make(chan map[int]*Location)
 
 	for i := 0; i < nWorkerThreads; i++ {
 		go processFilePart(c, res)
@@ -169,7 +186,7 @@ func parseFile(filename string, nWorkerThreads int) map[string]*Location {
 		c <- JobDefinition{filename, int64(i) * blockSize, blockSize}
 	}
 
-	resultMap := make(map[string]*Location, INITIAL_MAP_SIZE)
+	resultMap := make(map[int]*Location, INITIAL_MAP_SIZE)
 
 	for i := 0; i < nWorkerThreads; i++ {
 		m := <-res
@@ -177,6 +194,22 @@ func parseFile(filename string, nWorkerThreads int) map[string]*Location {
 	}
 
 	return resultMap
+}
+
+func printResults(resultMap map[int]*Location) {
+	keys := make([]TupleIntString, 0, len(resultMap))
+	for key, value := range resultMap {
+		keys = append(keys, TupleIntString{key, string(value.name)})
+	}
+
+	sort.Slice(keys, func(i, j int) bool { return keys[i].str < keys[j].str })
+	fmt.Println("Total locations:", len(keys))
+
+	results := make([]string, len(resultMap))
+	for i, item := range keys {
+		results[i] = toString(*resultMap[item.num])
+	}
+	fmt.Printf("{%s}\n", strings.Join(results, ", "))
 }
 
 func main() {
@@ -196,17 +229,6 @@ func main() {
 	}
 
 	resultMap := parseFile(filename, nWorkerThreads)
+	printResults(resultMap)
 
-	keys := make([]string, 0, len(resultMap))
-	for k := range resultMap {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	fmt.Println("Total locations:", len(keys))
-
-	results := make([]string, len(resultMap))
-	for i, k := range keys {
-		results[i] = toString(*resultMap[k])
-	}
-	fmt.Printf("{%s}\n", strings.Join(results, ", "))
 }
