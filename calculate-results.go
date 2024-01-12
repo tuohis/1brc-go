@@ -8,8 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 )
 
 type TupleIntString struct {
@@ -138,33 +136,41 @@ func processLine(line []byte, m LocationMap) {
 	}
 }
 
-func getFirstRune(line []byte) rune {
-	for i := 0; i < len(line); i++ {
-		rune, length := utf8.DecodeRune(line[i:])
-		if length > 0 {
-			return rune
-		}
-	}
-	return '0'
-}
-
-func isValidLine(line []byte) bool {
-	first := getFirstRune(line)
-	return unicode.IsUpper(first) && unicode.IsLetter(first)
-}
-
 func processFilePart(filename string, byteOffset, byteLength int64, co chan<- LocationMap) {
-	const BUFFER_SIZE = 1048576
 	readFile, err := os.Open(filename)
 	if err != nil {
 		fmt.Println(err)
+		return
 	}
 
+	const BUFFER_SIZE = 1048576
+	readBuffer := make([]byte, BUFFER_SIZE)
+
 	if byteOffset > 0 {
+		// Set the read pointer to the byte that's the first to follow a '\n' and be at or after byteOffset
 		readFile.Seek(byteOffset-1, 0)
+		seekDone := false
+		for byteIndex := int64(0); !seekDone && byteIndex < 1024; {
+			bytesRead, err := readFile.Read(readBuffer[0:128])
+			if err != nil {
+				fmt.Println(err)
+				return
+			}
+
+			for i, b := range readBuffer[0:bytesRead] {
+				if b == '\n' {
+					position := byteOffset + byteIndex + int64(i)
+					readFile.Seek(position, 0)
+					seekDone = true
+					break
+				}
+			}
+			byteIndex += int64(bytesRead)
+		}
 	}
+
 	fileScanner := bufio.NewScanner(readFile)
-	fileScanner.Buffer(make([]byte, BUFFER_SIZE), BUFFER_SIZE)
+	fileScanner.Buffer(readBuffer, BUFFER_SIZE)
 	fileScanner.Split(bufio.ScanLines)
 
 	m := make(LocationMap, INITIAL_MAP_SIZE)
@@ -173,10 +179,7 @@ func processFilePart(filename string, byteOffset, byteLength int64, co chan<- Lo
 	for fileScanner.Scan() && bytesScanned < byteLength {
 		line := fileScanner.Bytes()
 		bytesScanned += int64(len(line))
-		// All lines should start with an uppercase letter; discard those who don't.
-		if isValidLine(line) {
-			processLine(line, m)
-		}
+		processLine(line, m)
 	}
 
 	readFile.Close()
