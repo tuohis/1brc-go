@@ -153,36 +153,35 @@ func isValidLine(line []byte) bool {
 	return unicode.IsUpper(first) && unicode.IsLetter(first)
 }
 
-func processFilePart(ci <-chan JobDefinition, co chan<- LocationMap) {
-	for job := range ci {
-		readFile, err := os.Open(job.filename)
-		if err != nil {
-			fmt.Println(err)
-		}
-
-		if job.byteOffset > 0 {
-			readFile.Seek(job.byteOffset-1, 0)
-		}
-		fileScanner := bufio.NewScanner(readFile)
-		fileScanner.Buffer(make([]byte, 1048576), 1048576)
-		fileScanner.Split(bufio.ScanLines)
-
-		m := make(LocationMap, INITIAL_MAP_SIZE)
-
-		bytesScanned := int64(0)
-		for fileScanner.Scan() && bytesScanned < job.byteLength {
-			line := fileScanner.Bytes()
-			bytesScanned += int64(len(line))
-			// All lines should start with an uppercase letter; discard those who don't.
-			if isValidLine(line) {
-				processLine(line, m)
-			}
-		}
-
-		readFile.Close()
-
-		co <- m
+func processFilePart(filename string, byteOffset, byteLength int64, co chan<- LocationMap) {
+	const BUFFER_SIZE = 1048576
+	readFile, err := os.Open(filename)
+	if err != nil {
+		fmt.Println(err)
 	}
+
+	if byteOffset > 0 {
+		readFile.Seek(byteOffset-1, 0)
+	}
+	fileScanner := bufio.NewScanner(readFile)
+	fileScanner.Buffer(make([]byte, BUFFER_SIZE), BUFFER_SIZE)
+	fileScanner.Split(bufio.ScanLines)
+
+	m := make(LocationMap, INITIAL_MAP_SIZE)
+
+	bytesScanned := int64(0)
+	for fileScanner.Scan() && bytesScanned < byteLength {
+		line := fileScanner.Bytes()
+		bytesScanned += int64(len(line))
+		// All lines should start with an uppercase letter; discard those who don't.
+		if isValidLine(line) {
+			processLine(line, m)
+		}
+	}
+
+	readFile.Close()
+
+	co <- m
 }
 
 func getFileSize(filename string) int64 {
@@ -199,15 +198,10 @@ func parseFile(filename string, nWorkerThreads int) LocationMap {
 	fileSize := getFileSize(filename)
 	blockSize := fileSize / int64(nWorkerThreads)
 
-	c := make(chan JobDefinition)
 	res := make(chan LocationMap)
 
 	for i := 0; i < nWorkerThreads; i++ {
-		go processFilePart(c, res)
-	}
-
-	for i := 0; i < nWorkerThreads; i++ {
-		c <- JobDefinition{filename, int64(i) * blockSize, blockSize}
+		go processFilePart(filename, int64(i)*blockSize, blockSize, res)
 	}
 
 	resultMap := make(LocationMap, INITIAL_MAP_SIZE)
