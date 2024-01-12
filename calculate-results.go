@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -136,6 +137,35 @@ func processLine(line []byte, m LocationMap) {
 	}
 }
 
+func seekToLineStart(readFile *os.File, byteOffset int64) (int64, error) {
+	if byteOffset == 0 {
+		// Start of file is also a start of line
+		return 0, nil
+	}
+
+	readBuffer := make([]byte, 128)
+
+	// Set the read pointer to the byte that's the first to follow a '\n' and be at or after byteOffset
+	readFile.Seek(byteOffset-1, 0)
+	for byteIndex := int64(0); byteIndex < 1024; {
+		bytesRead, err := readFile.Read(readBuffer)
+		if err != nil {
+			fmt.Println(err)
+			return byteIndex, err
+		}
+
+		for i, b := range readBuffer[0:bytesRead] {
+			if b == '\n' {
+				position := byteOffset + byteIndex + int64(i)
+				readFile.Seek(position, 0)
+				return position - byteOffset, nil
+			}
+		}
+		byteIndex += int64(bytesRead)
+	}
+	return 1024, errors.New("No newline found!")
+}
+
 func processFilePart(filename string, byteOffset, byteLength int64, co chan<- LocationMap) {
 	readFile, err := os.Open(filename)
 	if err != nil {
@@ -145,28 +175,15 @@ func processFilePart(filename string, byteOffset, byteLength int64, co chan<- Lo
 
 	const BUFFER_SIZE = 1048576
 	readBuffer := make([]byte, BUFFER_SIZE)
+	bytesScanned := int64(0)
 
 	if byteOffset > 0 {
-		// Set the read pointer to the byte that's the first to follow a '\n' and be at or after byteOffset
-		readFile.Seek(byteOffset-1, 0)
-		seekDone := false
-		for byteIndex := int64(0); !seekDone && byteIndex < 1024; {
-			bytesRead, err := readFile.Read(readBuffer[0:128])
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-
-			for i, b := range readBuffer[0:bytesRead] {
-				if b == '\n' {
-					position := byteOffset + byteIndex + int64(i)
-					readFile.Seek(position, 0)
-					seekDone = true
-					break
-				}
-			}
-			byteIndex += int64(bytesRead)
+		bytesDiscarded, err := seekToLineStart(readFile, byteOffset)
+		if err != nil {
+			fmt.Println("Error when seeking newline: ", err)
+			return
 		}
+		bytesScanned += bytesDiscarded
 	}
 
 	fileScanner := bufio.NewScanner(readFile)
@@ -175,7 +192,6 @@ func processFilePart(filename string, byteOffset, byteLength int64, co chan<- Lo
 
 	m := make(LocationMap, INITIAL_MAP_SIZE)
 
-	bytesScanned := int64(0)
 	for fileScanner.Scan() && bytesScanned < byteLength {
 		line := fileScanner.Bytes()
 		bytesScanned += int64(len(line))
