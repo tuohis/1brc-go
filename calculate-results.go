@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"hash/maphash"
-	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -19,28 +17,88 @@ type TupleIntString struct {
 	str string
 }
 
+// Measurement is a fixed precision decimal with 0.1 accuracy
+type Measurement int64
+
+func (m Measurement) toFloat() float64 {
+	return float64(m) / 10
+}
+
+func parseMeasurement(byteStr []byte) Measurement {
+	zeroCode := byte('0')
+
+	// The value has exactly one decimal
+	multiplier := int64(1)
+	if byteStr[0] == '-' {
+		multiplier = -1
+	}
+
+	intValue := int64(0)
+	for _, b := range byteStr {
+		if b >= '0' && b <= '9' {
+			intValue = intValue*10 + int64(b-zeroCode)
+		}
+	}
+	return Measurement(multiplier * intValue)
+}
+
+func min(a, b Measurement) Measurement {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b Measurement) Measurement {
+	if a < b {
+		return b
+	}
+	return a
+}
+
 type Location struct {
 	name  []byte
 	hash  int
-	min   float64
-	max   float64
-	sum   float64
+	min   Measurement
+	max   Measurement
+	sum   Measurement
 	count int
 }
 
 func (loc *Location) toString() string {
-	return fmt.Sprintf("%s=%.1f/%.1f/%.1f", loc.name, loc.min, loc.sum/float64(loc.count), loc.max)
+	return fmt.Sprintf("%s=%.1f/%.1f/%.1f", loc.name, loc.min.toFloat(), loc.sum.toFloat()/float64(loc.count), loc.max.toFloat())
 }
 
 func (a *Location) merge(b *Location) *Location {
 	return &Location{
 		a.name,
 		a.hash,
-		math.Min(a.min, b.min),
-		math.Max(a.max, b.max),
+		min(a.min, b.min),
+		max(a.max, b.max),
 		a.sum + b.sum,
 		a.count + b.count,
 	}
+}
+
+func (loc *Location) append(m Measurement) {
+	loc.min = min(loc.min, m)
+	loc.max = max(loc.max, m)
+	loc.sum += m
+	loc.count++
+}
+
+type LocationMap map[int]*Location
+
+func (a LocationMap) merge(b LocationMap) LocationMap {
+	for key, loc := range b {
+		oldLocation, exists := a[key]
+		if exists {
+			a[key] = oldLocation.merge(loc)
+		} else {
+			a[key] = loc
+		}
+	}
+	return a
 }
 
 type JobDefinition struct {
@@ -51,8 +109,6 @@ type JobDefinition struct {
 
 const INITIAL_MAP_SIZE = 2048
 
-var SEED = maphash.MakeSeed()
-
 func calculateHash(bytes []byte) int {
 	h := 0x811c9dc5
 	for _, b := range bytes {
@@ -61,25 +117,7 @@ func calculateHash(bytes []byte) int {
 	return h
 }
 
-func parseFloat(byteStr []byte) float64 {
-	zeroCode := int('0')
-
-	// The value has exactly one decimal
-	multiplier := 0.1
-	if byteStr[0] == '-' {
-		multiplier = -0.1
-	}
-
-	intValue := 0
-	for _, b := range byteStr {
-		if b >= '0' && b <= '9' {
-			intValue = intValue*10 + (int(b) - zeroCode)
-		}
-	}
-	return multiplier * float64(intValue)
-}
-
-func processLine(line []byte, m map[int]*Location) {
+func processLine(line []byte, m LocationMap) {
 	nameBytes, valueBytes, found := bytes.Cut(line, []byte{';'})
 	if !found {
 		fmt.Printf("Separator not found in line %s\n", line)
@@ -87,14 +125,11 @@ func processLine(line []byte, m map[int]*Location) {
 	}
 
 	hash := calculateHash(nameBytes)
-	value := parseFloat(valueBytes)
+	value := parseMeasurement(valueBytes)
 	oldEntry, exists := m[hash]
 
 	if exists {
-		oldEntry.min = math.Min(oldEntry.min, value)
-		oldEntry.max = math.Max(oldEntry.max, value)
-		oldEntry.sum += value
-		oldEntry.count++
+		oldEntry.append(value)
 	} else {
 		name := make([]byte, len(nameBytes))
 		copy(name, nameBytes)
@@ -118,7 +153,7 @@ func isValidLine(line []byte) bool {
 	return unicode.IsUpper(first) && unicode.IsLetter(first)
 }
 
-func processFilePart(ci <-chan JobDefinition, co chan<- map[int]*Location) {
+func processFilePart(ci <-chan JobDefinition, co chan<- LocationMap) {
 	for job := range ci {
 		readFile, err := os.Open(job.filename)
 		if err != nil {
@@ -132,7 +167,7 @@ func processFilePart(ci <-chan JobDefinition, co chan<- map[int]*Location) {
 		fileScanner.Buffer(make([]byte, 1048576), 1048576)
 		fileScanner.Split(bufio.ScanLines)
 
-		m := make(map[int]*Location, INITIAL_MAP_SIZE)
+		m := make(LocationMap, INITIAL_MAP_SIZE)
 
 		bytesScanned := int64(0)
 		for fileScanner.Scan() && bytesScanned < job.byteLength {
@@ -160,23 +195,12 @@ func getFileSize(filename string) int64 {
 	return fi.Size()
 }
 
-func mergeMaps(a map[int]*Location, b map[int]*Location) {
-	for key, loc := range b {
-		oldLocation, exists := a[key]
-		if exists {
-			a[key] = oldLocation.merge(loc)
-		} else {
-			a[key] = loc
-		}
-	}
-}
-
-func parseFile(filename string, nWorkerThreads int) map[int]*Location {
+func parseFile(filename string, nWorkerThreads int) LocationMap {
 	fileSize := getFileSize(filename)
 	blockSize := fileSize / int64(nWorkerThreads)
 
 	c := make(chan JobDefinition)
-	res := make(chan map[int]*Location)
+	res := make(chan LocationMap)
 
 	for i := 0; i < nWorkerThreads; i++ {
 		go processFilePart(c, res)
@@ -186,17 +210,17 @@ func parseFile(filename string, nWorkerThreads int) map[int]*Location {
 		c <- JobDefinition{filename, int64(i) * blockSize, blockSize}
 	}
 
-	resultMap := make(map[int]*Location, INITIAL_MAP_SIZE)
+	resultMap := make(LocationMap, INITIAL_MAP_SIZE)
 
 	for i := 0; i < nWorkerThreads; i++ {
 		m := <-res
-		mergeMaps(resultMap, m)
+		resultMap.merge(m)
 	}
 
 	return resultMap
 }
 
-func printResults(resultMap map[int]*Location) {
+func printResults(resultMap LocationMap) {
 	keys := make([]TupleIntString, 0, len(resultMap))
 	for key, value := range resultMap {
 		keys = append(keys, TupleIntString{key, string(value.name)})
