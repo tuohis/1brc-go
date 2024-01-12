@@ -28,6 +28,21 @@ type Location struct {
 	count int
 }
 
+func (loc *Location) toString() string {
+	return fmt.Sprintf("%s=%.1f/%.1f/%.1f", loc.name, loc.min, loc.sum/float64(loc.count), loc.max)
+}
+
+func (a *Location) merge(b *Location) *Location {
+	return &Location{
+		a.name,
+		a.hash,
+		math.Min(a.min, b.min),
+		math.Max(a.max, b.max),
+		a.sum + b.sum,
+		a.count + b.count,
+	}
+}
+
 type JobDefinition struct {
 	filename   string
 	byteOffset int64
@@ -44,10 +59,6 @@ func calculateHash(bytes []byte) int {
 		h = (h ^ int(b)) * 0x01000193
 	}
 	return h
-}
-
-func toString(loc Location) string {
-	return fmt.Sprintf("%s=%.1f/%.1f/%.1f", loc.name, loc.min, loc.sum/float64(loc.count), loc.max)
 }
 
 func parseFloat(byteStr []byte) float64 {
@@ -149,24 +160,13 @@ func getFileSize(filename string) int64 {
 	return fi.Size()
 }
 
-func mergeLocations(a *Location, b *Location) *Location {
-	return &Location{
-		a.name,
-		a.hash,
-		math.Min(a.min, b.min),
-		math.Max(a.max, b.max),
-		a.sum + b.sum,
-		a.count + b.count,
-	}
-}
-
 func mergeMaps(a map[int]*Location, b map[int]*Location) {
-	for key, value := range b {
-		oldValue, exists := a[key]
+	for key, loc := range b {
+		oldLocation, exists := a[key]
 		if exists {
-			a[key] = mergeLocations(oldValue, value)
+			a[key] = oldLocation.merge(loc)
 		} else {
-			a[key] = value
+			a[key] = loc
 		}
 	}
 }
@@ -207,7 +207,7 @@ func printResults(resultMap map[int]*Location) {
 
 	results := make([]string, len(resultMap))
 	for i, item := range keys {
-		results[i] = toString(*resultMap[item.num])
+		results[i] = resultMap[item.num].toString()
 	}
 	fmt.Printf("{%s}\n", strings.Join(results, ", "))
 }
